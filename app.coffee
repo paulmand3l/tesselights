@@ -1,56 +1,92 @@
-fs = require 'fs'
+http = require 'http'
+url = require 'url'
 
-_ = require 'underscore'
-hue = require "node-hue-api"
-q = require "q"
+async = require 'async'
 
 tessel = require 'tessel'
 
-getUsernameForBridge = (id) ->
-  if fs.existsSync('usernames')
-    JSON.parse(fs.readFileSync('usernames', {'encoding': 'utf8'}))[id]
+scenes = require "./scenes.js"
 
-getBridge = ->
-  hue.locateBridges().then (bridges) ->
-    unless bridges.length > 0
-      throw new Error('No bridges detected.')
-    else if bridges.length == 1
-      bridges[0]
-    else
-      for bridge, i in bridges
-        console.log i, JSON.stringify bridge
-      q.nfcall(prompt.get, ['bridge id']).then (result) ->
-        bridges[result]
+get = (targetURL, cb) ->
+  urlParts = url.parse targetURL
 
-getUser = (bridge) ->
-  # Get the username associated with this bridge
-  username = getUsernameForBridge bridge.id
+  httpOptions =
+    hostname: urlParts.hostname
+    port: urlParts.port
+    path: urlParts.pathname
+    method: 'GET'
 
-  if username
-    console.log 'Found existing user:', username
-    q username
+  http.get httpOptions, cb
+
+put = (targetURL, jsonData, cb) ->
+  urlParts = url.parse targetURL
+
+  dataString = JSON.stringify jsonData
+
+  headers =
+    'Content-Type': 'application/json'
+    'Content-Length': dataString.length
+
+  httpOptions =
+    hostname: urlParts.hostname
+    port: urlParts.port
+    path: urlParts.pathname
+    method: 'PUT'
+    headers: headers
+
+  req = http.request httpOptions, (res) ->
+    responseString = ''
+
+    console.log 'got', res.statusCode
+
+    res.setEncoding 'utf-8'
+    res.on 'data', (data) ->
+      console.log 'got data', data
+      cb? null, data
+
+  req.on 'error', (e) ->
+    console.log 'ERROR:', e.message
+
+  req.write dataString
+  req.end()
+
+username = '2d54e40c303bd94f33a687e4de028e7'
+bridgeIP = '10.0.1.2'
+
+setLightState = (id, state, cb) ->
+  console.log 'setting', id, 'to', state
+  setImmediate put "http://#{bridgeIP}/api/#{username}/lights/#{id}/state", state, cb
+
+console.log 'Ready'
+
+currentScene = 'relax'
+
+tessel.button.on 'press', (time) ->
+  console.log 'button was pressed', time
+  tessel.led[1].write true
+
+tessel.button.on 'release', (time) ->
+  console.log 'button was released', time
+  tessel.led[1].write false
+
+  scenesToSet = []
+
+  if currentScene is 'relax'
+    console.log 'setting scene to bedtime'
+    for id, state of scenes.bedtime
+      do (id, state) ->
+        scenesToSet.push (cb) ->
+          setLightState id, state, cb
+    currentScene = 'bedtime'
   else
-    (new hue.HueApi()).registerUser(bridge.ipaddress).then (username) ->
-      bridgeToUsername = if fs.existsSync('usernames') then JSON.parse(fs.readFileSync('usernames', {'encoding': 'utf8'})) else {}
-      bridgeToUsername[bridge.id] = username
-      fs.writeFileSync('usernames', JSON.stringify(bridgeToUsername))
+    console.log 'setting scene to relax'
+    for id, state of scenes.relax
+      do (id, state) ->
+        scenesToSet.push (cb) ->
+          setLightState id, state, cb
+    currentScene = 'relax'
 
-      console.log 'Registered new user:', username
-      username
-
-hslLights = _.throttle (api, lights, h, s, l) ->
-  for light in lights
-    console.log 'Setting', light.name, 'to', h, s, l
-    api.setLightState light.id, hue.lightState.create().hsl(h, s, l).transition(0.2).on()
-, 200
-
-
-
-getBridge().then (bridge) ->
-  getUser(bridge).then (username) ->
-    api = new hue.HueApi bridge.ipaddress, username
-    api.searchForNewLights().then ->
-      api.lights().then (lights) ->
-        console.log 'Found lights', lights
-
-.done()
+  async.parallelLimit scenesToSet, 4, (err, res) ->
+    console.log 'done setting lights, got'
+    console.log '\terror:', err
+    console.log '\tresults:', res
